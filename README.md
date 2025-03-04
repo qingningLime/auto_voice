@@ -120,4 +120,4 @@ const DEEPSEEK_CONFIG = {
 </details>
 
 ## 📜 许可证
-MIT License © 2024 [Your Name]
+MIT License © 2024 [lime]
