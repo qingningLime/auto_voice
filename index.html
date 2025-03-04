@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>智能语音转写系统</title>
+<style>
+:root {
+--primary-blue: #2196F3;
+--alert-red: #ff4444;
+--background-gray: #f8f9fa;
+}
+body {
+font-family: system-ui, -apple-system, "PingFang SC", sans-serif;
+margin: 0;
+padding: 15px;
+background: var(--background-gray);
+min-height: 100vh;
+}
+.control-bar {
+display: grid;
+grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+gap: 10px;
+margin-bottom: 20px;
+position: sticky;
+top: 0;
+background: var(--background-gray);
+padding: 10px 0;
+z-index: 100;
+}
+.control-btn {
+padding: 12px 20px;
+font-size: 15px;
+border: none;
+border-radius: 8px;
+cursor: pointer;
+transition: all 0.2s;
+display: flex;
+align-items: center;
+justify-content: center;
+gap: 8px;
+background: var(--primary-blue);
+color: white;
+}
+.control-btn:disabled {
+opacity: 0.7;
+cursor: not-allowed;
+}
+.control-btn.secondary {
+background: #e0e0e0;
+color: #333;
+}
+.control-btn.ai {
+background: #4CAF50;
+}
+#transcript-container {
+border: 2px solid var(--primary-blue);
+border-radius: 10px;
+height: 60vh;
+padding: 20px;
+margin: 20px 0;
+background: white;
+line-height: 1.6;
+white-space: pre-wrap;
+overflow-y: auto;
+-webkit-overflow-scrolling: touch;
+font-size: 15px;
+box-shadow: inset 0 2px 4px rgba(0,0,0,0.05);
+}
+.status-indicator {
+display: flex;
+align-items: center;
+gap: 8px;
+color: #666;
+font-size: 14px;
+justify-content: center;
+margin: 10px 0;
+}
+.pulsing-dot {
+width: 12px;
+height: 12px;
+border-radius: 50%;
+background: var(--alert-red);
+animation: pulse 1.5s infinite;
+}
+.modal {
+display: none;
+position: fixed;
+top: 0;
+left: 0;
+width: 100%;
+height: 100%;
+background: rgba(0,0,0,0.5);
+z-index: 1000;
+}
+.modal-content {
+position: relative;
+background: white;
+padding: 20px;
+border-radius: 10px;
+width: 90%;
+max-width: 500px;
+margin: 20px auto;
+max-height: 80vh;
+overflow-y: auto;
+}
+.loading {
+display: flex;
+align-items: center;
+justify-content: center;
+gap: 10px;
+color: var(--primary-blue);
+padding: 20px;
+}
+.auto-save-notice {
+color: var(--alert-red);
+font-size: 12px;
+text-align: right;
+margin-top: -15px;
+padding-right: 5px;
+}
+@keyframes pulse {
+0% { opacity: 0.4; transform: scale(0.9); }
+50% { opacity: 1; transform: scale(1.3); }
+100% { opacity: 0.4; transform: scale(0.9); }
+}
+@media (max-width: 480px) {
+#transcript-container {
+height: 55vh;
+padding: 15px;
+font-size: 14px;
+}
+.control-btn {
+padding: 10px 15px;
+font-size: 14px;
+}
+}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/file-saver/dist/FileSaver.min.js"></script>
+</head>
+<body>
+<h1>智能语音转写系统</h1>
+
+<div class="control-bar">
+<button class="control-btn" id="startBtn">🎤 开始</button>
+<button class="control-btn" id="stopBtn" disabled>⏹️ 停止</button>
+<button class="control-btn secondary" id="clearBtn">🧹 清空</button>
+<button class="control-btn ai" id="summarizeBtn">🤖 总结</button>
+</div>
+
+<div class="status-indicator">
+<span id="statusText">准备就绪</span>
+<div id="recordingDot" class="pulsing-dot" hidden></div>
+</div>
+
+<div id="transcript-container"></div>
+<div class="auto-save-notice" id="autoSaveNotice">最后保存：<span id="lastSaveTime"></span></div>
+
+<div class="modal" id="summaryModal">
+<div class="modal-content">
+<h3>AI智能总结</h3>
+<div id="summaryContent"></div>
+<div class="loading" id="summaryLoading" hidden>
+<div class="pulsing-dot"></div>
+总结中...
+</div>
+<button class="control-btn secondary" onclick="closeModal()">关闭</button>
+</div>
+</div>
+
+<script>
+const STORAGE_CONFIG = {
+KEY: 'voice_transcript_v2',
+AUTO_SAVE_INTERVAL: 3000
+};
+
+const RECOGNITION_CONFIG = {
+LANG: 'zh-CN',
+INTERIM_RESULTS: true,
+CONTINUOUS: true,
+MAX_RETRIES: 5,
+RETRY_DELAY: 1000
+};
+
+const DEEPSEEK_CONFIG = {
+API_URL: 'your_api_url',//your api_url
+MODEL: 'your_model',
+MAX_TOKENS: 2000,
+TEMPERATURE: 0.5
+};
+
+let recognition;
+let transcript = '';
+let retryCount = 0;
+let saveInterval;
+let isUserStopped = false;
+
+function initSpeechRecognition() {
+const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+if (!SpeechRecognition) return showError('浏览器不支持语音识别');
+
+// Safari兼容性处理
+recognition = new SpeechRecognition();
+if (typeof recognition.continuous === 'undefined') {
+  recognition.continuous = true;
+  recognition.interimResults = true;
+}
+
+// iOS设备需要用户明确授权
+if (/iPhone|iPad|iPod/i.test(navigator.userAgent)) {
+  recognition.onstart = () => {
+    if (typeof recognition.start === 'function' && recognition.state === 'running') {
+      handleIOSPermission();
+    }
+  };
+}
+recognition.lang = RECOGNITION_CONFIG.LANG;
+recognition.interimResults = RECOGNITION_CONFIG.INTERIM_RESULTS;
+recognition.continuous = RECOGNITION_CONFIG.CONTINUOUS;
+
+recognition.onstart = () => {
+isUserStopped = false;
+retryCount = 0;
+updateUIState(true);
+showStatus('语音采集中...');
+};
+
+recognition.onresult = (event) => {
+processResults(event.results, event.resultIndex);
+};
+
+recognition.onerror = (event) => {
+handleRecognitionError(event.error);
+};
+
+recognition.onend = () => {
+if (!isUserStopped && retryCount < RECOGNITION_CONFIG.MAX_RETRIES) {
+retryCount++;
+setTimeout(() => recognition.start(), RECOGNITION_CONFIG.RETRY_DELAY);
+showStatus(`重新连接中 (${retryCount}/${RECOGNITION_CONFIG.MAX_RETRIES})`);
+} else {
+updateUIState(false);
+}
+};
+}
+
+function processResults(results, startIndex) {
+let interim = '';
+for (let i = startIndex; i < results.length; i++) {
+const result = results[i];
+if (result.isFinal) {
+transcript += result[0].transcript + '\n';
+} else {
+interim += result[0].transcript;
+}
+}
+updateTranscriptDisplay(interim);
+}
+
+function updateTranscriptDisplay(interim) {
+const container = document.getElementById('transcript-container');
+const displayText = transcript + (interim ? `\n\n识别中: ${interim}` : '');
+
+const wasScrolledBottom = isScrolledToBottom(container);
+container.textContent = displayText;
+
+if (wasScrolledBottom) {
+setTimeout(() => {
+container.scrollTop = container.scrollHeight;
+}, 50);
+}
+}
+
+function autoSave() {
+try {
+const saveData = {
+content: transcript,
+timestamp: Date.now()
+};
+localStorage.setItem(STORAGE_CONFIG.KEY, JSON.stringify(saveData));
+document.getElementById('lastSaveTime').textContent =
+new Date(saveData.timestamp).toLocaleTimeString();
+} catch (error) {
+console.error('自动保存失败:', error);
+}
+}
+
+function loadSavedData() {
+try {
+const saved = JSON.parse(localStorage.getItem(STORAGE_CONFIG.KEY));
+if (saved?.content) {
+transcript = saved.content;
+updateTranscriptDisplay();
+document.getElementById('autoSaveNotice').style.display = 'block';
+document.getElementById('lastSaveTime').textContent =
+new Date(saved.timestamp).toLocaleTimeString();
+}
+} catch (error) {
+console.error('加载保存数据失败:', error);
+}
+}
+
+async function generateSummary() {
+const apiKey = 'sk-';//your api_key
+if (!apiKey) return;
+
+const content = transcript.trim();
+if (!content) return alert('暂无转录内容');
+
+const modal = document.getElementById('summaryModal');
+const contentDiv = document.getElementById('summaryContent');
+const loading = document.getElementById('summaryLoading');
+    
+modal.style.display = 'block';
+contentDiv.innerHTML = '';
+loading.hidden = false;
+
+try {
+const response = await fetch(DEEPSEEK_CONFIG.API_URL, {
+method: 'POST',
+headers: {
+'Content-Type': 'application/json',
+'Authorization': `Bearer ${apiKey}`
+},
+body: JSON.stringify({
+model: DEEPSEEK_CONFIG.MODEL,
+messages: [{
+role: "user",
+content: `请用中文对以下内容进行专业总结，要求：\n
+1. 分条款列出主要结论\n
+2. 标出关键数据\n\n
+内容：${content.substring(0, 40000)}`
+}],
+temperature: DEEPSEEK_CONFIG.TEMPERATURE,
+max_tokens: DEEPSEEK_CONFIG.MAX_TOKENS
+})
+});
+
+if (!response.ok) throw new Error(`API请求失败: ${response.status}`);
+const data = await response.json();
+const summary = data.choices[0]?.message?.content || '无有效总结内容';
+contentDiv.innerHTML = marked.parse(summary);
+} catch (error) {
+contentDiv.textContent = `总结失败: ${error.message}`;
+} finally {
+loading.hidden = true;
+}
+}
+
+function closeModal() {
+document.getElementById('summaryModal').style.display = 'none';
+}
+
+function updateUIState(isRecording) {
+document.getElementById('startBtn').disabled = isRecording;
+document.getElementById('stopBtn').disabled = !isRecording;
+document.getElementById('recordingDot').hidden = !isRecording;
+}
+
+function showStatus(text) {
+document.getElementById('statusText').textContent = text;
+}
+
+function showError(message) {
+alert(`错误: ${message}`);
+}
+
+function isScrolledToBottom(element) {
+return element.scrollHeight - element.scrollTop <= element.clientHeight + 100;
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+loadSavedData();
+initSpeechRecognition();
+saveInterval = setInterval(autoSave, STORAGE_CONFIG.AUTO_SAVE_INTERVAL);
+});
+
+document.getElementById('startBtn').addEventListener('click', () => {
+// iOS必须通过用户手势直接触发
+if (/iPhone|iPad|iPod/i.test(navigator.userAgent)) {
+  try {
+    transcript += '\n\n--- 新会话 ' + new Date().toLocaleString() + ' ---\n';
+    recognition.start();
+  } catch (error) {
+    showError('iOS设备请长按开始按钮授权麦克风权限');
+  }
+} else {
+  transcript += '\n\n--- 新会话 ' + new Date().toLocaleString() + ' ---\n';
+  recognition.start();
+}
+});
+
+// iOS权限处理
+function handleIOSPermission() {
+if (typeof DeviceMotionEvent.requestPermission === 'function') {
+  DeviceMotionEvent.requestPermission()
+    .then(permissionState => {
+      if (permissionState === 'granted') {
+        recognition.start();
+      }
+    })
+    .catch(err => showError('麦克风权限被拒绝：' + err));
+}
+}
+
+document.getElementById('stopBtn').addEventListener('click', () => {
+isUserStopped = true;
+recognition.stop();
+});
+
+document.getElementById('clearBtn').addEventListener('click', () => {
+if (confirm('确定要清除所有内容和保存记录吗？')) {
+transcript = '';
+localStorage.removeItem(STORAGE_CONFIG.KEY);
+updateTranscriptDisplay();
+document.getElementById('autoSaveNotice').style.display = 'none';
+}
+});
+
+document.getElementById('summarizeBtn').addEventListener('click', generateSummary);
+
+document.addEventListener('visibilitychange', () => {
+if (document.visibilityState === 'visible' && recognition) {
+recognition.start();
+}
+});
+
+window.addEventListener('unload', () => {
+clearInterval(saveInterval);
+autoSave();
+});
+</script>
+</body>
+</html>
